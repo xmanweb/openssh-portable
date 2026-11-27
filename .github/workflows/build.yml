@@ -120,7 +120,6 @@ jobs:
             Write-Error "No Windows 10/11 SDK found under $sdkDir"
             exit 1
           }
-
           Write-Host "Using WindowsTargetPlatformVersion: $sdkVer"
 
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -152,9 +151,49 @@ jobs:
             }
           }
 
-          if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
-            Write-Error "msbuild.exe not found under $vsInstallPath"
+          # 1. Locate existing x64 OpenSSL include/lib
+          $sslHeader = Get-ChildItem -Path @(
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\OpenSSL-Win64",
+            "C:\vcpkg\installed\x64-windows",
+            "D:\a"
+          ) -Filter "opensslv.h" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          # 2. If not found, install Shining Light Win64 OpenSSL via winget
+          if (-not $sslHeader -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing Win64 OpenSSL via winget..."
+            winget install --id ShiningLight.OpenSSL.Light -e --accept-source-agreements --accept-package-agreements --silent | Out-Null
+            $sslHeader = Get-ChildItem -Path @(
+              "C:\Program Files\OpenSSL-Win64",
+              "C:\OpenSSL-Win64"
+            ) -Filter "opensslv.h" -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          }
+
+          if (-not $sslHeader) {
+            Write-Error "openssl/opensslv.h not found and automatic install failed."
             exit 1
+          }
+
+          # opensslv.h is usually <root>\include\openssl\opensslv.h
+          $opensslInclude = Split-Path (Split-Path $sslHeader.FullName -Parent) -Parent
+          $opensslRoot = Split-Path $opensslInclude -Parent
+          $opensslLib = Join-Path $opensslRoot "lib\VC\x64\MD"
+          if (-not (Test-Path $opensslLib)) {
+            $opensslLib = Join-Path $opensslRoot "lib"
+          }
+
+          Write-Host "Found OpenSSL root: $opensslRoot"
+          Write-Host "Found OpenSSL include: $opensslInclude"
+
+          $env:OPENSSL_DIR = $opensslRoot
+          $env:OPENSSL_ROOT_DIR = $opensslRoot
+          if ($env:INCLUDE -notlike "*$opensslInclude*") {
+            $env:INCLUDE = "$opensslInclude;$env:INCLUDE"
+          }
+          if ($env:LIB -notlike "*$opensslLib*") {
+            $env:LIB = "$opensslLib;$env:LIB"
           }
 
           $logFile = "OpenSSHReleasex64.log"
@@ -164,6 +203,7 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:WindowsTargetPlatformVersion=$sdkVer `
+            /p:ExternalIncludePath="$opensslInclude;$env:ExternalIncludePath" `
             /fl `
             /flp:LogFile=$logFile`;Verbosity=normal
 
