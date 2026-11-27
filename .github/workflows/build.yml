@@ -18,35 +18,21 @@ jobs:
           path: openssh-portable
           submodules: recursive
 
-      - name: Checkout vcpkg
+      - name: Checkout vcpkg (full history)
         uses: actions/checkout@v4
         with:
           repository: microsoft/vcpkg
           path: vcpkg
+          fetch-depth: 0
 
       - name: Install vcpkg dependencies for x64
         shell: pwsh
         working-directory: openssh-portable
         run: |
-          $vcpkgRoot = (Resolve-Path "..\vcpkg").Path
-          $env:VCPKG_ROOT = $vcpkgRoot
-
+          $env:VCPKG_ROOT = (Resolve-Path "..\vcpkg").Path
           .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture x64
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Install-VcpkgDependencies.ps1 exited with $LASTEXITCODE, running vcpkg install directly for details..."
-            Push-Location "contrib\win32\openssh"
-            try {
-              & "$vcpkgRoot\vcpkg.exe" install `
-                --triplet x64-custom `
-                --overlay-triplets=.\vcpkg_triplets `
-                --overlay-ports=.\vcpkg_overlay_ports `
-                --x-install-root=.\vcpkg_installed\x64-custom
-              if ($LASTEXITCODE -ne 0) {
-                throw "vcpkg install failed with exit code $LASTEXITCODE"
-              }
-            } finally {
-              Pop-Location
-            }
+            throw "Install-VcpkgDependencies.ps1 failed with exit code $LASTEXITCODE"
           }
 
       - name: Build OpenSSH (x64 Release)
