@@ -116,7 +116,19 @@ jobs:
             Copy-Item $_.FullName -Destination $outDir -Force
           }
           Write-Host "Runtime DLLs staged in $outDir"
+      - name: Diagnose include path variables
+        shell: pwsh
+        working-directory: openssh-portable
+        run: |
+          Write-Host "===== paths.targets (vcpkg / openssl related) ====="
+          $pt = "contrib\win32\openssh\paths.targets"
+          if (Test-Path $pt) {
+            Select-String -Path $pt -Pattern "vcpkg|OpenSSL|LibreSSL|include" -Context 1,1
+          }
 
+          Write-Host "`n===== Actual location of opensslv.h ====="
+          Get-ChildItem "contrib\win32\openssh\vcpkg_installed" -Filter "opensslv.h" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 FullName
+          
       - name: Build OpenSSH (x64 Release)
         id: build
         shell: pwsh
