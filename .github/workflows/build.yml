@@ -18,13 +18,12 @@ jobs:
           path: openssh-portable
           submodules: recursive
 
-      - name: Checkout vcpkg
+      - name: Checkout vcpkg (full history)
         uses: actions/checkout@v4
         with:
           repository: microsoft/vcpkg
           path: vcpkg
-          # 移除 fetch-depth: 1，使用默认完整克隆
-          # 完整历史是 vcpkg 解析 baseline 和 port tree 所必需的
+          fetch-depth: 0   # 显式完整克隆，覆盖默认的浅克隆行为
 
       - name: Cache vcpkg downloads and installed tree
         uses: actions/cache@v4
