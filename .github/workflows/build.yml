@@ -29,8 +29,19 @@ jobs:
       - name: Install vcpkg dependencies
         shell: pwsh
         run: |
+          $vcpkgDir = Join-Path (Split-Path $PWD -Parent) "vcpkg"
+          if (-not (Test-Path $vcpkgDir)) {
+            git clone https://github.com/Microsoft/vcpkg.git $vcpkgDir
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to clone vcpkg into $vcpkgDir"
+            }
+          }
+
           $arch = "${{ inputs.arch }}"
           .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture $arch
+          if (-not $LASTEXITCODE -eq 0) {
+            throw "Install-VcpkgDependencies.ps1 failed"
+          }
 
       - name: Patch custom vcpkg triplet for libfido2 C4815
         shell: pwsh
