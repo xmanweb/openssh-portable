@@ -122,6 +122,7 @@ jobs:
           }
           Write-Host "Using WindowsTargetPlatformVersion: $sdkVer"
 
+          # Locate MSBuild.exe directly without running heavy VsDevCmd.bat
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsInstallPath = $null
           if (Test-Path $vsWhere) {
@@ -131,79 +132,72 @@ jobs:
             $vsInstallPath = "C:\Program Files\Microsoft Visual Studio\18\Enterprise"
           }
 
-          $devCmd = Join-Path $vsInstallPath "Common7\Tools\VsDevCmd.bat"
-          if (Test-Path $devCmd) {
-            Write-Host "Loading environment via: $devCmd"
-            cmd /c "`"$devCmd`" -arch=x64 -host_arch=x64 && set" | ForEach-Object {
-              if ($_ -match '^([^=]+)=(.*)$') {
-                [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+          $msbuildCandidates = @(
+            (Join-Path $vsInstallPath "MSBuild\Current\Bin\amd64\MSBuild.exe"),
+            (Join-Path $vsInstallPath "MSBuild\Current\Bin\MSBuild.exe"),
+            "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe",
+            "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+          )
+          $msbuildExe = $msbuildCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $msbuildExe) {
+            Write-Error "MSBuild.exe not found under $vsInstallPath"
+            exit 1
+          }
+          Write-Host "Using MSBuild: $msbuildExe"
+
+          # Check common OpenSSL paths without deep recursion
+          $sslCandidates = @(
+            "C:\Program Files\OpenSSL-Win64",
+            "C:\OpenSSL-Win64",
+            "C:\vcpkg\installed\x64-windows",
+            "D:\a\_temp\openssl"
+          )
+          $opensslRoot = $null
+          foreach ($dir in $sslCandidates) {
+            if (Test-Path (Join-Path $dir "include\openssl\opensslv.h")) {
+              $opensslRoot = $dir
+              break
+            }
+          }
+
+          if (-not $opensslRoot -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing Win64 OpenSSL via winget..."
+            winget install --id ShiningLight.OpenSSL.Light -e --disable-interactivity --accept-source-agreements --accept-package-agreements --silent
+            foreach ($dir in @("C:\Program Files\OpenSSL-Win64", "C:\OpenSSL-Win64")) {
+              if (Test-Path (Join-Path $dir "include\openssl\opensslv.h")) {
+                $opensslRoot = $dir
+                break
               }
             }
           }
 
-          if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
-            $msbuildExe = Get-ChildItem -Path $vsInstallPath -Filter "MSBuild.exe" -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match '\\amd64\\' -or $_.FullName -match '\\Bin\\' } |
-              Select-Object -First 1 -ExpandProperty FullName
-            if ($msbuildExe) {
-              $msbuildDir = Split-Path $msbuildExe -Parent
-              $env:PATH = "$msbuildDir;$env:PATH"
+          $extraArgs = @()
+          if ($opensslRoot) {
+            $opensslInclude = Join-Path $opensslRoot "include"
+            $opensslLib = Join-Path $opensslRoot "lib\VC\x64\MD"
+            if (-not (Test-Path $opensslLib)) {
+              $opensslLib = Join-Path $opensslRoot "lib"
             }
-          }
-
-          # 1. Locate existing x64 OpenSSL include/lib
-          $sslHeader = Get-ChildItem -Path @(
-            "C:\Program Files\OpenSSL-Win64",
-            "C:\OpenSSL-Win64",
-            "C:\vcpkg\installed\x64-windows",
-            "D:\a"
-          ) -Filter "opensslv.h" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-
-          # 2. If not found, install Shining Light Win64 OpenSSL via winget
-          if (-not $sslHeader -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Host "Installing Win64 OpenSSL via winget..."
-            winget install --id ShiningLight.OpenSSL.Light -e --accept-source-agreements --accept-package-agreements --silent | Out-Null
-            $sslHeader = Get-ChildItem -Path @(
-              "C:\Program Files\OpenSSL-Win64",
-              "C:\OpenSSL-Win64"
-            ) -Filter "opensslv.h" -Recurse -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-          }
-
-          if (-not $sslHeader) {
-            Write-Error "openssl/opensslv.h not found and automatic install failed."
-            exit 1
-          }
-
-          # opensslv.h is usually <root>\include\openssl\opensslv.h
-          $opensslInclude = Split-Path (Split-Path $sslHeader.FullName -Parent) -Parent
-          $opensslRoot = Split-Path $opensslInclude -Parent
-          $opensslLib = Join-Path $opensslRoot "lib\VC\x64\MD"
-          if (-not (Test-Path $opensslLib)) {
-            $opensslLib = Join-Path $opensslRoot "lib"
-          }
-
-          Write-Host "Found OpenSSL root: $opensslRoot"
-          Write-Host "Found OpenSSL include: $opensslInclude"
-
-          $env:OPENSSL_DIR = $opensslRoot
-          $env:OPENSSL_ROOT_DIR = $opensslRoot
-          if ($env:INCLUDE -notlike "*$opensslInclude*") {
+            Write-Host "Using OpenSSL root: $opensslRoot"
+            $env:OPENSSL_DIR = $opensslRoot
+            $env:OPENSSL_ROOT_DIR = $opensslRoot
             $env:INCLUDE = "$opensslInclude;$env:INCLUDE"
-          }
-          if ($env:LIB -notlike "*$opensslLib*") {
             $env:LIB = "$opensslLib;$env:LIB"
+            $extraArgs += "/p:ExternalIncludePath=$opensslInclude"
+          }
+          else {
+            Write-Warning "OpenSSL include not found yet; proceeding with MSBuild to inspect error."
           }
 
           $logFile = "OpenSSHReleasex64.log"
-          msbuild Win32-OpenSSH.sln `
+          & $msbuildExe Win32-OpenSSH.sln `
             /m `
             /t:Rebuild `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:WindowsTargetPlatformVersion=$sdkVer `
-            /p:ExternalIncludePath="$opensslInclude;$env:ExternalIncludePath" `
+            @extraArgs `
             /fl `
             /flp:LogFile=$logFile`;Verbosity=normal
 
