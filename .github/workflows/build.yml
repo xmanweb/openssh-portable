@@ -32,21 +32,28 @@ jobs:
         shell: pwsh
         run: |
           Import-Module .\contrib\win32\openssh\OpenSSHBuildHelper.psm1 -Force
-          Start-OpenSSHBuild -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
-          if ($LASTEXITCODE -ne 0) {
-            $logPath = ".\contrib\win32\openssh\OpenSSH${{ inputs.configuration }}${{ inputs.arch }}.log"
+          $logPath = ".\contrib\win32\openssh\OpenSSH${{ inputs.configuration }}${{ inputs.arch }}.log"
+          try {
+            Start-OpenSSHBuild -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
+            if ($LASTEXITCODE -ne 0) { throw "Start-OpenSSHBuild failed with exit code $LASTEXITCODE" }
+            Start-OpenSSHPackage -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
+            if ($LASTEXITCODE -ne 0) { throw "Start-OpenSSHPackage failed with exit code $LASTEXITCODE" }
+          } catch {
             if (Test-Path $logPath) {
-              Select-String -Path $logPath -Pattern "error [A-Z0-9]+:|fatal error|MSB[0-9]+|vcpkg" | Select-Object -Last 60
+              Write-Host "=== Matched error lines ==="
+              Select-String -Path $logPath -Pattern "error\s+[A-Z0-9]+:|fatal error|MSB[0-9]+|vcpkg" | Select-Object -Last 60 | ForEach-Object { $_.Line }
+              Write-Host "=== Tail of log ==="
+              Get-Content -Path $logPath -Tail 60
             }
-            exit 1
+            throw
           }
-          Start-OpenSSHPackage -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
 
       - name: Upload build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: OpenSSH-${{ inputs.arch }}-${{ inputs.configuration }}
           path: |
             contrib\win32\openssh\*.zip
             contrib\win32\openssh\*.log
-          if-no-files-found: warn
+          if-no-files-found: ignore
