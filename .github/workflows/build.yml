@@ -28,8 +28,12 @@ jobs:
       - name: Install vcpkg dependencies for x64
         shell: pwsh
         working-directory: openssh-portable
+        env:
+          _CL_: /wd4815
         run: |
-          $env:VCPKG_ROOT = (Resolve-Path "..\vcpkg").Path
+          $vcpkgRoot = (Resolve-Path "..\vcpkg").Path
+          $env:VCPKG_ROOT = $vcpkgRoot
+
           .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture x64
           if ($LASTEXITCODE -ne 0) {
             throw "Install-VcpkgDependencies.ps1 failed with exit code $LASTEXITCODE"
