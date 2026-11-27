@@ -1,223 +1,59 @@
-name: Build Win32 OpenSSH
+name: Build Win32-OpenSSH (x64)
 
 on:
+  push:
+    branches: [ latestw_all ]
+  pull_request:
+    branches: [ latestw_all ]
   workflow_dispatch:
-    inputs:
-      arch:
-        description: 'Target architecture (x64 or arm64)'
-        required: true
-        default: 'x64'
-      configuration:
-        description: 'Build configuration (Release or Debug)'
-        required: true
-        default: 'Release'
 
 jobs:
-  build:
+  build-x64:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository into openssh-portable
         uses: actions/checkout@v4
         with:
+          path: openssh-portable
           submodules: recursive
 
-      - name: Workaround libfido2 C4815 in overlay port
+      - name: Checkout vcpkg sibling repository
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+
+      - name: Install vcpkg dependencies for x64
         shell: pwsh
+        working-directory: openssh-portable
         run: |
-          $portfile = "contrib\win32\openssh\vcpkg_overlay_ports\libfido2\portfile.cmake"
-          if (-not (Test-Path $portfile)) {
-            throw "libfido2 portfile not found: $portfile"
+          $env:VCPKG_ROOT = (Resolve-Path "..\vcpkg").Path
+          $result = .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture x64
+          if ($result -and $result.ContainsKey("Success") -and -not $result.Success) {
+            throw "Install-VcpkgDependencies.ps1 failed: $($result.Errors -join '; ')"
           }
 
-          $content = Get-Content -Path $portfile -Raw
-          if ($content -notmatch 'wd4815') {
-            $updated = $content -replace '(vcpkg_cmake_configure\([\s\S]*?OPTIONS\s*)', "`$1`n        -DCMAKE_C_FLAGS=`"/wd4815 /WX-`"`n        "
-            if ($updated -eq $content) {
-              $updated = $content -replace '(vcpkg_cmake_configure\([\s\S]*?)(\r?\n\))', "`$1`n    OPTIONS`n        -DCMAKE_C_FLAGS=`"/wd4815 /WX-`"`$2"
-            }
-            Set-Content -Path $portfile -Value $updated -Encoding UTF8
-            Write-Host "Updated $portfile to suppress C4815 / disable /WX for libfido2"
-          }
-
-      - name: Install vcpkg and dependencies
+      - name: Build OpenSSH (x64 Release)
         shell: pwsh
+        working-directory: openssh-portable
         run: |
-          $arch = "${{ inputs.arch }}"
-          $triplet = "$arch-custom"
-          $repoRoot = $PWD.Path
-          $vcpkgDir = Join-Path (Split-Path $repoRoot -Parent) "vcpkg"
+          $env:VCPKG_ROOT = (Resolve-Path "..\vcpkg").Path
+          .\.github\tools\Start-OpenSSHBuild.ps1 -Configuration Release -Architecture x64
 
-          if (-not (Test-Path $vcpkgDir)) {
-            git clone https://github.com/Microsoft/vcpkg.git $vcpkgDir
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to clone vcpkg into $vcpkgDir"
-            }
-          }
-
-          $vcpkgExe = Join-Path $vcpkgDir "vcpkg.exe"
-          if (-not (Test-Path $vcpkgExe)) {
-            & (Join-Path $vcpkgDir "bootstrap-vcpkg.bat")
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to bootstrap vcpkg"
-            }
-          }
-
-          $sshDir = Join-Path $repoRoot "contrib\win32\openssh"
-          $installedRoot = Join-Path $sshDir "vcpkg_installed"
-
-          Push-Location $sshDir
-          try {
-            & $vcpkgExe install `
-              --triplet $triplet `
-              --x-install-root=$installedRoot `
-              --overlay-triplets=.\vcpkg_triplets `
-              --overlay-ports=.\vcpkg_overlay_ports
-            if ($LASTEXITCODE -ne 0) {
-              throw "vcpkg install failed for triplet $triplet"
-            }
-          }
-          finally {
-            Pop-Location
-          }
-
-          $expectedDll = Join-Path $installedRoot "$triplet\$triplet\bin\libcrypto.dll"
-          if (-not (Test-Path $expectedDll)) {
-            $foundDll = Get-ChildItem (Split-Path $repoRoot -Parent) -Filter "libcrypto.dll" -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notmatch '\\debug\\' } |
-              Select-Object -First 1
-
-            if (-not $foundDll) {
-              $foundDll = Get-ChildItem (Split-Path $repoRoot -Parent) -Filter "libcrypto.dll" -Recurse -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            }
-
-            if ($foundDll) {
-              $targetDir = Split-Path $expectedDll -Parent
-              New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-              Copy-Item -Path $foundDll.FullName -Destination $expectedDll -Force
-              Write-Host "Copied $($foundDll.FullName) -> $expectedDll"
-            } else {
-              throw "libcrypto.dll was not produced anywhere under $(Split-Path $repoRoot -Parent)"
-            }
-          } else {
-            Write-Host "Found expected DLL at $expectedDll"
-          }
-
-      - name: Build Win32-OpenSSH
-        shell: pwsh
-        working-directory: contrib/win32/openssh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $sdkDir = "C:\Program Files (x86)\Windows Kits\10\Include"
-          $sdkVer = Get-ChildItem -Path $sdkDir -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-            Sort-Object { [version]$_.Name } -Descending |
-            Select-Object -First 1 -ExpandProperty Name
-
-          if (-not $sdkVer) {
-            Write-Error "No Windows 10/11 SDK found under $sdkDir"
-            exit 1
-          }
-          Write-Host "Using WindowsTargetPlatformVersion: $sdkVer"
-
-          # Locate MSBuild.exe directly without running heavy VsDevCmd.bat
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsInstallPath = $null
-          if (Test-Path $vsWhere) {
-            $vsInstallPath = (& $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
-          }
-          if (-not $vsInstallPath) {
-            $vsInstallPath = "C:\Program Files\Microsoft Visual Studio\18\Enterprise"
-          }
-
-          $msbuildCandidates = @(
-            (Join-Path $vsInstallPath "MSBuild\Current\Bin\amd64\MSBuild.exe"),
-            (Join-Path $vsInstallPath "MSBuild\Current\Bin\MSBuild.exe"),
-            "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\amd64\MSBuild.exe",
-            "C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
-          )
-          $msbuildExe = $msbuildCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-          if (-not $msbuildExe) {
-            Write-Error "MSBuild.exe not found under $vsInstallPath"
-            exit 1
-          }
-          Write-Host "Using MSBuild: $msbuildExe"
-
-          # Check common OpenSSL paths without deep recursion
-          $sslCandidates = @(
-            "C:\Program Files\OpenSSL-Win64",
-            "C:\OpenSSL-Win64",
-            "C:\vcpkg\installed\x64-windows",
-            "D:\a\_temp\openssl"
-          )
-          $opensslRoot = $null
-          foreach ($dir in $sslCandidates) {
-            if (Test-Path (Join-Path $dir "include\openssl\opensslv.h")) {
-              $opensslRoot = $dir
-              break
-            }
-          }
-
-          if (-not $opensslRoot -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Host "Installing Win64 OpenSSL via winget..."
-            winget install --id ShiningLight.OpenSSL.Light -e --disable-interactivity --accept-source-agreements --accept-package-agreements --silent
-            foreach ($dir in @("C:\Program Files\OpenSSL-Win64", "C:\OpenSSL-Win64")) {
-              if (Test-Path (Join-Path $dir "include\openssl\opensslv.h")) {
-                $opensslRoot = $dir
-                break
-              }
-            }
-          }
-
-          $extraArgs = @()
-          if ($opensslRoot) {
-            $opensslInclude = Join-Path $opensslRoot "include"
-            $opensslLib = Join-Path $opensslRoot "lib\VC\x64\MD"
-            if (-not (Test-Path $opensslLib)) {
-              $opensslLib = Join-Path $opensslRoot "lib"
-            }
-            Write-Host "Using OpenSSL root: $opensslRoot"
-            $env:OPENSSL_DIR = $opensslRoot
-            $env:OPENSSL_ROOT_DIR = $opensslRoot
-            $env:INCLUDE = "$opensslInclude;$env:INCLUDE"
-            $env:LIB = "$opensslLib;$env:LIB"
-            $extraArgs += "/p:ExternalIncludePath=$opensslInclude"
-          }
-          else {
-            Write-Warning "OpenSSL include not found yet; proceeding with MSBuild to inspect error."
-          }
-
-          $logFile = "OpenSSHReleasex64.log"
-          & $msbuildExe Win32-OpenSSH.sln `
-            /m `
-            /t:Rebuild `
-            /p:Configuration=Release `
-            /p:Platform=x64 `
-            /p:WindowsTargetPlatformVersion=$sdkVer `
-            @extraArgs `
-            /fl `
-            /flp:LogFile=$logFile`;Verbosity=normal
-
-          $msbuildExit = $LASTEXITCODE
-          if ($msbuildExit -ne 0) {
-            Write-Host "=== MSBuild failed with exit code $msbuildExit ==="
-            if (Test-Path $logFile) {
-              Write-Host "--- First error matches ---"
-              Select-String -Path $logFile -Pattern ":\s*(fatal )?error\s+[A-Z0-9]+:|error MSB\d+:" -Context 2,2 |
-                Select-Object -First 40
-              Write-Host "--- Log tail (last 60 lines) ---"
-              Get-Content -Path $logFile -Tail 60
-            }
-            exit $msbuildExit
-          }
-
-      - name: Upload MSBuild Log
+      - name: Inspect build log and warnings
         if: always()
+        shell: pwsh
+        working-directory: openssh-portable
+        run: |
+          .\.github\tools\Test-OpenSSHBuild.ps1 -Configuration Release -Architecture x64
+
+      - name: Upload build artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: msbuild-log
-          path: contrib/win32/openssh/OpenSSHReleasex64.log
-          if-no-files-found: ignore
+          name: openssh-win64-release
+          path: |
+            openssh-portable/bin/x64/Release/**
+            openssh-portable/contrib/win32/openssh/x64/Release/**
+            !**/.*.pdb
