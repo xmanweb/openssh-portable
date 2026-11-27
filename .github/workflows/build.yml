@@ -123,21 +123,39 @@ jobs:
 
           Write-Host "Using WindowsTargetPlatformVersion: $sdkVer"
 
-          $vsInstallPath = "C:\Program Files\Microsoft Visual Studio\18\Enterprise"
-          $devShellDll = Join-Path $vsInstallPath "Common7\Tools\Microsoft.VisualStudio.DevShell.18.0.dll"
-
-          if (-not (Test-Path $devShellDll)) {
-            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            $vsInstallPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-            if (-not $vsInstallPath) {
-              Write-Error "Visual Studio with MSBuild not found."
-              exit 1
-            }
-            $devShellDll = Join-Path $vsInstallPath "Common7\Tools\Microsoft.VisualStudio.DevShell.18.0.dll"
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsInstallPath = $null
+          if (Test-Path $vsWhere) {
+            $vsInstallPath = (& $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1)
+          }
+          if (-not $vsInstallPath) {
+            $vsInstallPath = "C:\Program Files\Microsoft Visual Studio\18\Enterprise"
           }
 
-          Import-Module $devShellDll
-          Enter-VsDevShell -VsInstallPath $vsInstallPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
+          $devCmd = Join-Path $vsInstallPath "Common7\Tools\VsDevCmd.bat"
+          if (Test-Path $devCmd) {
+            Write-Host "Loading environment via: $devCmd"
+            cmd /c "`"$devCmd`" -arch=x64 -host_arch=x64 && set" | ForEach-Object {
+              if ($_ -match '^([^=]+)=(.*)$') {
+                [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+              }
+            }
+          }
+
+          if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
+            $msbuildExe = Get-ChildItem -Path $vsInstallPath -Filter "MSBuild.exe" -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\amd64\\' -or $_.FullName -match '\\Bin\\' } |
+              Select-Object -First 1 -ExpandProperty FullName
+            if ($msbuildExe) {
+              $msbuildDir = Split-Path $msbuildExe -Parent
+              $env:PATH = "$msbuildDir;$env:PATH"
+            }
+          }
+
+          if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
+            Write-Error "msbuild.exe not found under $vsInstallPath"
+            exit 1
+          }
 
           $logFile = "OpenSSHReleasex64.log"
           msbuild Win32-OpenSSH.sln `
