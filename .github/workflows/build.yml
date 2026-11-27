@@ -12,13 +12,13 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository into openssh-portable
+      - name: Checkout openssh-portable
         uses: actions/checkout@v4
         with:
           path: openssh-portable
           submodules: recursive
 
-      - name: Checkout vcpkg sibling repository
+      - name: Checkout vcpkg
         uses: actions/checkout@v4
         with:
           repository: microsoft/vcpkg
@@ -28,10 +28,25 @@ jobs:
         shell: pwsh
         working-directory: openssh-portable
         run: |
-          $env:VCPKG_ROOT = (Resolve-Path "..\vcpkg").Path
-          $result = .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture x64
-          if ($result -and $result.ContainsKey("Success") -and -not $result.Success) {
-            throw "Install-VcpkgDependencies.ps1 failed: $($result.Errors -join '; ')"
+          $vcpkgRoot = (Resolve-Path "..\vcpkg").Path
+          $env:VCPKG_ROOT = $vcpkgRoot
+
+          .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture x64
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Install-VcpkgDependencies.ps1 exited with $LASTEXITCODE, running vcpkg install directly for details..."
+            Push-Location "contrib\win32\openssh"
+            try {
+              & "$vcpkgRoot\vcpkg.exe" install `
+                --triplet x64-custom `
+                --overlay-triplets=.\vcpkg_triplets `
+                --overlay-ports=.\vcpkg_overlay_ports `
+                --x-install-root=.\vcpkg_installed\x64-custom
+              if ($LASTEXITCODE -ne 0) {
+                throw "vcpkg install failed with exit code $LASTEXITCODE"
+              }
+            } finally {
+              Pop-Location
+            }
           }
 
       - name: Build OpenSSH (x64 Release)
