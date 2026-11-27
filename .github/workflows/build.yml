@@ -1,0 +1,45 @@
+name: Build Win32 OpenSSH
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Target architecture (x64 or arm64)'
+        required: true
+        default: 'x64'
+      configuration:
+        description: 'Build configuration (Release or Debug)'
+        required: true
+        default: 'Release'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout openssh-portable
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git ${{ runner.temp }}\vcpkg
+          & "${{ runner.temp }}\vcpkg\bootstrap-vcpkg.bat"
+          & "${{ runner.temp }}\vcpkg\vcpkg.exe" integrate install
+
+      - name: Build and package OpenSSH
+        shell: pwsh
+        run: |
+          Import-Module .\contrib\win32\openssh\OpenSSHBuildHelper.psm1 -Force
+          Start-OpenSSHBuild -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
+          Start-OpenSSHPackage -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenSSH-${{ inputs.arch }}-${{ inputs.configuration }}
+          path: |
+            contrib\win32\openssh\*.zip
+            contrib\win32\openssh\*.log
+          if-no-files-found: warn
