@@ -118,14 +118,36 @@ jobs:
           Write-Host "Runtime DLLs staged in $outDir"
 
       - name: Build OpenSSH (x64 Release)
+        id: build
         shell: pwsh
         working-directory: openssh-portable
         run: |
           $env:VCPKG_ROOT = (Resolve-Path "..\vcpkg").Path
-          .\.github\tools\Start-OpenSSHBuild.ps1 -Configuration Release -Architecture x64
-          if ($LASTEXITCODE -ne 0) {
-            throw "Start-OpenSSHBuild.ps1 failed with exit code $LASTEXITCODE"
+
+          # 找到 vcpkg 实际安装的 include 和 lib 目录
+          $vcpkgRoot = $env:VCPKG_ROOT
+          $triplet = "x64-custom"
+          $installed = "contrib\win32\openssh\vcpkg_installed\$triplet"
+
+          $includeDir = Join-Path $installed "include"
+          $libDir     = Join-Path $installed "lib"
+
+          if (-not (Test-Path $includeDir)) {
+            throw "vcpkg include directory not found: $includeDir"
           }
+          if (-not (Test-Path $libDir)) {
+            throw "vcpkg lib directory not found: $libDir"
+          }
+
+          Write-Host "Injecting vcpkg include: $includeDir"
+          Write-Host "Injecting vcpkg lib:     $libDir"
+
+          # 追加到环境变量，MSBuild 的 cl.exe 会自动读取
+          $env:INCLUDE = "$includeDir;$env:INCLUDE"
+          $env:LIB     = "$libDir;$env:LIB"
+
+          # 再执行构建脚本
+          .\.github\tools\Start-OpenSSHBuild.ps1 -Configuration Release -Architecture x64
 
       - name: Inspect build log and warnings
         if: always()
