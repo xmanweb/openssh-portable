@@ -33,6 +33,13 @@ jobs:
         run: |
           Import-Module .\contrib\win32\openssh\OpenSSHBuildHelper.psm1 -Force
           Start-OpenSSHBuild -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
+          if ($LASTEXITCODE -ne 0) {
+            $logPath = ".\contrib\win32\openssh\OpenSSH${{ inputs.configuration }}${{ inputs.arch }}.log"
+            if (Test-Path $logPath) {
+              Select-String -Path $logPath -Pattern "error [A-Z0-9]+:|fatal error|MSB[0-9]+|vcpkg" | Select-Object -Last 60
+            }
+            exit 1
+          }
           Start-OpenSSHPackage -Configuration ${{ inputs.configuration }} -NativeHostArch ${{ inputs.arch }}
 
       - name: Upload build artifacts
