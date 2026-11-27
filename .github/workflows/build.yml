@@ -13,7 +13,7 @@ on:
         default: 'Release'
 
 jobs:
-  build-x64:
+  build:
     runs-on: windows-latest
 
     env:
@@ -26,47 +26,44 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          $arch = "${{ inputs.arch }}"
+          .\.github\tools\Install-VcpkgDependencies.ps1 -Bootstrap -Architecture $arch
+
       - name: Patch custom vcpkg triplet for libfido2 C4815
         shell: pwsh
         run: |
-          $tripletName = "x64-custom"
-          $candidates = @(
-            "contrib\win32\openssh\triplets\$tripletName.cmake",
-            "triplets\$tripletName.cmake",
-            "contrib\win32\openssh\vcpkg_installed\$tripletName\x64-custom.cmake",
-            "contrib\win32\openssh\vcpkg_installed\$tripletName.cmake"
-          )
+          $arch = "${{ inputs.arch }}"
+          $tripletFile = "contrib\win32\openssh\vcpkg_triplets\$arch-custom.cmake"
 
-          $patched = $false
-          $snippet = @'
-          # Auto-injected for libfido2 C4815 compatibility with MSVC 14.52+
-          if(PORT STREQUAL "libfido2")
-              list(APPEND VCPKG_C_FLAGS "/wd4815")
-              string(APPEND VCPKG_C_FLAGS_DEBUG " /wd4815")
-              string(APPEND VCPKG_C_FLAGS_RELEASE " /wd4815")
-          endif()
-          '@
-
-          foreach ($path in $candidates) {
-            if (Test-Path $path) {
-              $content = Get-Content -Path $path -Raw -ErrorAction SilentlyContinue
-              if ($content -notmatch 'PORT STREQUAL "libfido2"') {
-                Add-Content -Path $path -Value $snippet -Encoding UTF8
-                Write-Host "Patched triplet: $path"
-              } else {
-                Write-Host "Already patched: $path"
-              }
-              $patched = $true
-            }
+          if (-not (Test-Path $tripletFile)) {
+            throw "Triplet file not found: $tripletFile"
           }
 
-          if (-not $patched) {
-            Write-Host "No matching triplet file found in preset candidates; relying on env flags."
+          $content = Get-Content -Path $tripletFile -Raw
+          if ($content -notmatch 'PORT STREQUAL "libfido2"') {
+            @(
+              ""
+              "# Suppress C4815 for libfido2 on newer MSVC"
+              'if(PORT STREQUAL "libfido2")'
+              '    list(APPEND VCPKG_C_FLAGS "/wd4815")'
+              '    string(APPEND VCPKG_C_FLAGS_DEBUG " /wd4815")'
+              '    string(APPEND VCPKG_C_FLAGS_RELEASE " /wd4815")'
+              "endif()"
+            ) | Add-Content -Path $tripletFile -Encoding UTF8
+            Write-Host "Patched $tripletFile"
+          } else {
+            Write-Host "Already patched $tripletFile"
           }
 
       - name: Build Win32-OpenSSH with OpenSSHBuildHelper
         shell: pwsh
         run: |
+          $arch = "${{ inputs.arch }}"
+          $config = "${{ inputs.configuration }}"
+
           Import-Module .\contrib\win32\openssh\OpenSSHBuildHelper.psm1 -Force
 
           $vsInstallPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" `
@@ -81,15 +78,15 @@ jobs:
 
           $msbuild = Join-Path $vsInstallPath "MSBuild\Current\Bin\amd64\MSBuild.exe"
           $slnPath = Join-Path $PWD "contrib\win32\openssh\Win32-OpenSSH.sln"
-          $logPath = Join-Path $PWD "contrib\win32\openssh\OpenSSHReleasex64.log"
+          $logPath = Join-Path $PWD "contrib\win32\openssh\OpenSSH${config}${arch}.log"
 
           Write-Host "Using MSBuild path: $msbuild"
-          Write-Host "Starting Open SSH build; Build Log: $logPath."
+          Write-Host "Starting Open SSH build ($arch / $config); Build Log: $logPath"
 
           & $msbuild $slnPath `
             /t:Rebuild `
-            /p:Platform=x64 `
-            /p:Configuration=Release `
+            "/p:Platform=$arch" `
+            "/p:Configuration=$config" `
             /m `
             /nologo `
             /fl `
@@ -104,5 +101,5 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: openssh-build-log-x64
-          path: contrib\win32\openssh\OpenSSHReleasex64.log
+          name: openssh-build-log-${{ inputs.arch }}-${{ inputs.configuration }}
+          path: contrib\win32\openssh\OpenSSH${{ inputs.configuration }}${{ inputs.arch }}.log
