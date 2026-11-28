@@ -219,7 +219,6 @@ jobs:
           & "$bin\ssh.exe" -V
           if ($LASTEXITCODE -ne 0) { throw "ssh.exe -V failed" }
           Write-Host "Smoke test passed"
-
       - name: Upload build artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -228,5 +227,5 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            openssh-portable/bin/x64/Release/*.exe
-            openssh-portable/bin/x64/Release/*.dll
+            openssh-portable/bin/x64/Release/**
+    
