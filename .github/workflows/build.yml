@@ -105,7 +105,6 @@ jobs:
           }
           Write-Host "Runtime DLLs staged in $outDir"
 
-      # 核心修复：直接向 .vcxproj 的 ClCompile / Link 条目注入 vcpkg 绝对路径
       - name: Patch vcxproj files with vcpkg include/lib
         shell: pwsh
         working-directory: openssh-portable
@@ -125,7 +124,6 @@ jobs:
             $raw = Get-Content $proj.FullName -Raw
             $changed = $false
 
-            # 在 ItemDefinitionGroup 的 ClCompile 下注入 AdditionalIncludeDirectories
             if ($raw -match '<ClCompile>') {
               if ($raw -match '<AdditionalIncludeDirectories>(.*?)</AdditionalIncludeDirectories>') {
                 $existing = $Matches[1]
@@ -135,14 +133,12 @@ jobs:
                   $changed = $true
                 }
               } else {
-                # ClCompile 下没有 AdditionalIncludeDirectories，则在 <ClCompile> 后插入
                 $raw = $raw -replace '(<ClCompile>)',
                                      "`$1`r`n      <AdditionalIncludeDirectories>$vcpkgInclude;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>"
                 $changed = $true
               }
             }
 
-            # 在 ItemDefinitionGroup 的 Link 下注入 AdditionalLibraryDirectories
             if ($raw -match '<Link>') {
               if ($raw -match '<AdditionalLibraryDirectories>(.*?)</AdditionalLibraryDirectories>') {
                 $existing = $Matches[1]
@@ -162,11 +158,10 @@ jobs:
               Set-Content $proj.FullName -Value $raw -NoNewline -Encoding utf8NoBOM
               Write-Host "Patched: $($proj.Name)"
             } else {
-              Write-Host "Skipped (already contains vcpkg paths or no target elements): $($proj.Name)"
+              Write-Host "Skipped: $($proj.Name)"
             }
           }
 
-          # 验证注入结果
           Write-Host "`n===== Verification: include path in libssh.vcxproj ====="
           Select-String -Path "contrib\win32\openssh\libssh.vcxproj" -Pattern "AdditionalIncludeDirectories" -Context 0,1
 
@@ -219,6 +214,47 @@ jobs:
           & "$bin\ssh.exe" -V
           if ($LASTEXITCODE -ne 0) { throw "ssh.exe -V failed" }
           Write-Host "Smoke test passed"
+
+      - name: Prepare clean release package
+        if: success()
+        shell: pwsh
+        working-directory: openssh-portable
+        run: |
+          $src = "bin\x64\Release"
+          $dst = "package\OpenSSH-Win64"
+
+          if (Test-Path "package") { Remove-Item "package" -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+
+          Get-ChildItem $src -Recurse -File |
+            Where-Object {
+              $_.FullName -notmatch '\\unittest-[^\\]+\\' -and
+              $_.Extension -ne '.pdb'
+            } |
+            ForEach-Object {
+              $relative = $_.FullName.Substring((Resolve-Path $src).Path.Length + 1)
+              $target = Join-Path $dst $relative
+              $targetDir = Split-Path $target -Parent
+              if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Force -Path $targetDir | Out-Null }
+              Copy-Item $_.FullName -Destination $target -Force
+            }
+
+          Write-Host "===== Clean package contents ====="
+          Get-ChildItem $dst -Recurse -File | Sort-Object FullName | ForEach-Object {
+            "{0,10:N0}  {1}" -f $_.Length, $_.FullName.Replace((Resolve-Path $dst).Path + "\", "")
+          }
+          Write-Host "Total: $((Get-ChildItem $dst -Recurse -File).Count) files"
+
+      - name: Create zip archive
+        if: success()
+        shell: pwsh
+        working-directory: openssh-portable
+        run: |
+          $zip = "OpenSSH-Win64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "package\OpenSSH-Win64\*" -DestinationPath $zip -CompressionLevel Optimal
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,2)) MB)"
+
       - name: Upload build artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -227,5 +263,5 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            openssh-portable/bin/x64/Release/**
-    
+            openssh-portable/OpenSSH-Win64.zip
+            openssh-portable/package/OpenSSH-Win64/**
