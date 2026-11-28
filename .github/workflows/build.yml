@@ -18,7 +18,6 @@ jobs:
           path: openssh-portable
           submodules: recursive
 
-      # vcpkg manifest 解析需要完整历史，浅克隆会失败
       - name: Checkout vcpkg (full history)
         uses: actions/checkout@v4
         with:
@@ -40,7 +39,6 @@ jobs:
       - name: Install vcpkg dependencies for x64
         shell: pwsh
         working-directory: openssh-portable
-        # 脚本末尾的 libcrypto.dll 路径校验与当前 vcpkg 布局不匹配，但 install 本身成功
         continue-on-error: true
         run: |
           $vcpkgRoot = (Resolve-Path "..\vcpkg").Path
@@ -107,16 +105,11 @@ jobs:
           }
           Write-Host "Runtime DLLs staged in $outDir"
 
-      # 核心修复：paths.targets 中没有 IncludePath/LibraryPath，
-      # 导致 MSBuild 无从找到 vcpkg 的 openssl/opensslv.h。
-      # 这里在 <PropertyGroup> 末尾注入 vcpkg include/lib 绝对路径。
-      - name: Patch paths.targets with vcpkg include/lib
+      # 核心修复：直接向 .vcxproj 的 ClCompile / Link 条目注入 vcpkg 绝对路径
+      - name: Patch vcxproj files with vcpkg include/lib
         shell: pwsh
         working-directory: openssh-portable
         run: |
-          $targets = "contrib\win32\openssh\paths.targets"
-          if (-not (Test-Path $targets)) { throw "paths.targets not found: $targets" }
-
           $vcpkgRoot    = (Resolve-Path "contrib\win32\openssh\vcpkg_installed\x64-custom").Path
           $vcpkgInclude = Join-Path $vcpkgRoot "include"
           $vcpkgLib     = Join-Path $vcpkgRoot "lib"
@@ -124,50 +117,58 @@ jobs:
           if (-not (Test-Path $vcpkgInclude)) { throw "vcpkg include not found: $vcpkgInclude" }
           if (-not (Test-Path $vcpkgLib))     { throw "vcpkg lib not found: $vcpkgLib" }
 
-          Write-Host "paths.targets : $targets"
-          Write-Host "vcpkg include : $vcpkgInclude"
-          Write-Host "vcpkg lib     : $vcpkgLib"
-          Write-Host ""
-          Write-Host "===== paths.targets BEFORE ====="
-          Get-Content $targets
+          Write-Host "vcpkg include: $vcpkgInclude"
+          Write-Host "vcpkg lib    : $vcpkgLib"
 
-          $content = Get-Content $targets -Raw
+          $vcxprojs = Get-ChildItem "contrib\win32\openssh\*.vcxproj"
+          foreach ($proj in $vcxprojs) {
+            $raw = Get-Content $proj.FullName -Raw
+            $changed = $false
 
-          # IncludePath：有则前置 vcpkg 路径，无则插入
-          if ($content -match '<IncludePath>') {
-            $content = [regex]::Replace($content, '<IncludePath>([^<]*)</IncludePath>', {
-              param($m)
-              "<IncludePath>$vcpkgInclude;$($m.Groups[1].Value)</IncludePath>"
-            })
-            Write-Host "Prepended vcpkg include to existing <IncludePath>"
-          } else {
-            $inject = "  <IncludePath>`$(IncludePath);$vcpkgInclude</IncludePath>`r`n"
-            $idx = $content.LastIndexOf("</PropertyGroup>")
-            if ($idx -lt 0) { throw "No </PropertyGroup> in paths.targets" }
-            $content = $content.Substring(0, $idx) + $inject + $content.Substring($idx)
-            Write-Host "Inserted new <IncludePath>"
+            # 在 ItemDefinitionGroup 的 ClCompile 下注入 AdditionalIncludeDirectories
+            if ($raw -match '<ClCompile>') {
+              if ($raw -match '<AdditionalIncludeDirectories>(.*?)</AdditionalIncludeDirectories>') {
+                $existing = $Matches[1]
+                if ($existing -notlike "*$vcpkgInclude*") {
+                  $raw = $raw -replace '<AdditionalIncludeDirectories>(.*?)</AdditionalIncludeDirectories>',
+                                     "<AdditionalIncludeDirectories>$vcpkgInclude;`$1</AdditionalIncludeDirectories>"
+                  $changed = $true
+                }
+              } else {
+                # ClCompile 下没有 AdditionalIncludeDirectories，则在 <ClCompile> 后插入
+                $raw = $raw -replace '(<ClCompile>)',
+                                     "`$1`r`n      <AdditionalIncludeDirectories>$vcpkgInclude;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>"
+                $changed = $true
+              }
+            }
+
+            # 在 ItemDefinitionGroup 的 Link 下注入 AdditionalLibraryDirectories
+            if ($raw -match '<Link>') {
+              if ($raw -match '<AdditionalLibraryDirectories>(.*?)</AdditionalLibraryDirectories>') {
+                $existing = $Matches[1]
+                if ($existing -notlike "*$vcpkgLib*") {
+                  $raw = $raw -replace '<AdditionalLibraryDirectories>(.*?)</AdditionalLibraryDirectories>',
+                                     "<AdditionalLibraryDirectories>$vcpkgLib;`$1</AdditionalLibraryDirectories>"
+                  $changed = $true
+                }
+              } else {
+                $raw = $raw -replace '(<Link>)',
+                                     "`$1`r`n      <AdditionalLibraryDirectories>$vcpkgLib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>"
+                $changed = $true
+              }
+            }
+
+            if ($changed) {
+              Set-Content $proj.FullName -Value $raw -NoNewline -Encoding utf8NoBOM
+              Write-Host "Patched: $($proj.Name)"
+            } else {
+              Write-Host "Skipped (already contains vcpkg paths or no target elements): $($proj.Name)"
+            }
           }
 
-          # LibraryPath：同上
-          if ($content -match '<LibraryPath>') {
-            $content = [regex]::Replace($content, '<LibraryPath>([^<]*)</LibraryPath>', {
-              param($m)
-              "<LibraryPath>$vcpkgLib;$($m.Groups[1].Value)</LibraryPath>"
-            })
-            Write-Host "Prepended vcpkg lib to existing <LibraryPath>"
-          } else {
-            $inject = "  <LibraryPath>`$(LibraryPath);$vcpkgLib</LibraryPath>`r`n"
-            $idx = $content.LastIndexOf("</PropertyGroup>")
-            if ($idx -lt 0) { throw "No </PropertyGroup> in paths.targets" }
-            $content = $content.Substring(0, $idx) + $inject + $content.Substring($idx)
-            Write-Host "Inserted new <LibraryPath>"
-          }
-
-          Set-Content -Path $targets -Value $content -NoNewline -Encoding utf8NoBOM
-
-          Write-Host ""
-          Write-Host "===== paths.targets AFTER ====="
-          Get-Content $targets
+          # 验证注入结果
+          Write-Host "`n===== Verification: include path in libssh.vcxproj ====="
+          Select-String -Path "contrib\win32\openssh\libssh.vcxproj" -Pattern "AdditionalIncludeDirectories" -Context 0,1
 
       - name: Build OpenSSH (x64 Release)
         id: build
